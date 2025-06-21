@@ -1,11 +1,29 @@
+using Amazon;
 using JobManager.API.Entities;
 using JobManager.API.Persistance;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
+builder.Configuration.AddSystemsManager(source =>
+{
+    source.AwsOptions = new Amazon.Extensions.NETCore.Setup.AWSOptions
+    {
+        Region = Amazon.RegionEndpoint.USEast2 // Change to your region
+    };
+
+    source.Path = "/";
+    source.ReloadAfter = TimeSpan.FromMinutes(1);
+});
+
+//builder.Configuration.AddSecretsManager(null, RegionEndpoint.USEast2, config =>
+//{
+//    config.KeyGenerator = (Secret, name) => name.Replace("/", ":");
+//    config.PollingInterval = TimeSpan.FromMinutes(5);
+//});
 
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
