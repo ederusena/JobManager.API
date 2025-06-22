@@ -1,9 +1,12 @@
 using Amazon;
+using Amazon.S3;
+using Amazon.S3.Model;
 using JobManager.API.Entities;
 using JobManager.API.Persistance;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using static System.Net.Mime.MediaTypeNames;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -48,86 +51,114 @@ app.MapPost("/api/jobs", async (Job job, AppDbContext db) =>
 {
     await db.Jobs.AddAsync(job);
     await db.SaveChangesAsync();
+
     return Results.Created($"/api/jobs/{job.Id}", job);
 });
 
 app.MapGet("/api/jobs/{id}", async (int id, AppDbContext db) =>
 {
-    var job = await db.Jobs.FindAsync(id);
-    if (job == null)
+    var job = await db.Jobs.SingleOrDefaultAsync(j => j.Id == id);
+
+    if (job is null)
     {
         return Results.NotFound();
     }
+
     return Results.Ok(job);
 });
 
 app.MapGet("/api/jobs", async (AppDbContext db) =>
 {
     var jobs = await db.Jobs.ToListAsync();
+
     return Results.Ok(jobs);
 });
 
-app.MapPost("/api/jobs/{jobId}/applications", async (int jobId, JobApplication application, [FromServices] AppDbContext db) =>
+app.MapPost("/api/jobs/{id}/job-applications", async (int id, JobApplication application, [FromServices] AppDbContext db) =>
 {
-    var job = await db.Jobs.FindAsync(jobId);
-    if (job == null)
+    var exists = await db.Jobs.AnyAsync(j => j.Id == id);
+
+    if (!exists)
     {
         return Results.NotFound();
     }
 
-    application.JobId = jobId;
+    application.JobId = id;
+
     await db.JobApplications.AddAsync(application);
     await db.SaveChangesAsync();
-    return Results.Created($"/api/jobs/{jobId}/applications/{application.Id}", application);
+
+    return Results.NoContent();
 });
 
-app.MapPut("/api/applications/{id}", async (int id, IFormFile file, [FromServices] AppDbContext db) =>
+app.MapPut("/api/job-applications/{id}/upload-cv", async (int id, IFormFile file, [FromServices] AppDbContext db) =>
 {
-    if (file is null || file.Length == 0)
+    if (file == null || file.Length == 0)
     {
-        return Results.BadRequest("File is required.");
+        return Results.BadRequest();
     }
 
-    var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
-    var validExtensions = new[] { ".pdf", ".docx", ".txt" };
+    var extension = Path.GetExtension(file.FileName);
+
+    var validExtensions = new List<string> { ".pdf", ".docx" };
 
     if (!validExtensions.Contains(extension))
     {
-        return Results.BadRequest("Invalid file type. Only PDF, DOCX, and TXT files are allowed.");
+        return Results.BadRequest();
     }
 
+    var client = new AmazonS3Client(RegionEndpoint.USEast2);
 
-    var application = await db.JobApplications.SingleOrDefaultAsync(a => a.Id == id);
-    if (application == null)
-    {
-        return Results.NotFound();
-    }
-
+    var bucketName = "awstudys2";
     var key = $"job-applications/{id}-{file.FileName}";
 
-    application.CVUrl = key;
-        
-    db.JobApplications.Update(application);
-    await db.SaveChangesAsync();
-        
-    return Results.Ok(application);
-});
+    using var stream = file.OpenReadStream();
 
-app.MapPost("/api/jobs/{jobId}/applications/{applicationId}/cv", async (int jobId, int applicationId, IFormFile cvFile, [FromServices] AppDbContext db) =>
-{
-    var application = await db.JobApplications.FindAsync(applicationId);
-    if (application == null || application.JobId != jobId)
+    var putObject = new PutObjectRequest
+    {
+        BucketName = bucketName,
+        Key = key,
+        InputStream = stream
+    };
+
+    var response = await client.PutObjectAsync(putObject);
+
+    var application = await db.JobApplications.SingleOrDefaultAsync(ja => ja.Id == id);
+
+    if (application is null)
     {
         return Results.NotFound();
     }
-    // Here you would typically upload the CV to S3 and get the URL back
-    // For simplicity, we will just simulate this
-    application.CVUrl = $"https://s3.example.com/cvs/{cvFile.FileName}";
-    
-    db.JobApplications.Update(application);
+
+    application.CVUrl = key;
+
     await db.SaveChangesAsync();
-    
-    return Results.Ok(application);
+
+    return Results.NoContent();
+}).DisableAntiforgery();
+
+app.MapGet("/api/job-applications/{id}/cv", async (int id, string email, [FromServices] AppDbContext db) =>
+{
+    var application = await db.JobApplications.FirstOrDefaultAsync(ja => ja.CandidateEmail == email);
+
+    if (application is null)
+    {
+        return Results.NotFound();
+    }
+
+    var bucketName = "awstudys2";
+
+    var getRequest = new GetObjectRequest
+    {
+        BucketName = bucketName,
+        Key = application.CVUrl
+    };
+
+    var client = new AmazonS3Client(RegionEndpoint.USEast2);
+
+    var response = await client.GetObjectAsync(getRequest);
+
+    return Results.File(response.ResponseStream, response.Headers.ContentType);
 });
 
 //app.MapControllers();
