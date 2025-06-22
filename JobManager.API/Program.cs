@@ -1,6 +1,7 @@
 using Amazon;
 using Amazon.S3;
 using Amazon.S3.Model;
+using JobManager.API.DTO;
 using JobManager.API.Entities;
 using JobManager.API.Persistance;
 using Microsoft.AspNetCore.DataProtection;
@@ -74,16 +75,22 @@ app.MapGet("/api/jobs", async (AppDbContext db) =>
     return Results.Ok(jobs);
 });
 
-app.MapPost("/api/jobs/{id}/job-applications", async (int id, JobApplication application, [FromServices] AppDbContext db) =>
+app.MapPost("/api/jobs/{jobId}/job-applications", async (int jobId, JobApplicationRequest request, [FromServices] AppDbContext db) =>
 {
-    var exists = await db.Jobs.AnyAsync(j => j.Id == id);
+    var exists = await db.Jobs.AnyAsync(j => j.Id == jobId);
 
     if (!exists)
     {
         return Results.NotFound();
     }
 
-    application.JobId = id;
+    var application = new JobApplication
+    {
+        JobId = jobId,
+        CandidateName = request.CandidateName,
+        CandidateEmail = request.CandidateEmail,
+        CVUrl = string.Empty // Pode deixar vazio até fazer o upload
+    };
 
     await db.JobApplications.AddAsync(application);
     await db.SaveChangesAsync();
