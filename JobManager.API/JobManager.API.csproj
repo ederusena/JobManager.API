@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="Amazon.Extensions.Configuration.SystemsManager" Version="7.0.0" />
+    <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.0.1.8" />
     <PackageReference Include="AWSSDK.S3" Version="4.0.2" />
     <PackageReference Include="AWSSDK.SimpleSystemsManagement" Version="4.0.1.10" />
     <PackageReference Include="AWSSDK.SQS" Version="4.0.0.11" />

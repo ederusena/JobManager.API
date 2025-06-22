@@ -1,4 +1,6 @@
 using Amazon;
+using Amazon.DynamoDBv2;
+using Amazon.DynamoDBv2.DataModel;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Amazon.SQS;
@@ -6,6 +8,7 @@ using JobManager.API.Configuration;
 using JobManager.API.DTO;
 using JobManager.API.Entities;
 using JobManager.API.Persistance;
+using JobManager.API.Persistance.Models;
 using JobManager.API.Workers;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
@@ -44,10 +47,10 @@ builder.Services.AddSingleton(new SqsSettings
     QueueUrl = connectionStringSqs
 });
 
-builder.Services.AddHostedService<JobApplicationNotificationWorker>();
-
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(connectionString));
+
+builder.Services.AddHostedService<JobApplicationNotificationWorker>();
 
 var app = builder.Build();
 
@@ -59,6 +62,147 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+app.MapPost("/api/v2/jobs", async (Job job) =>
+{
+    var client = new AmazonDynamoDBClient(RegionEndpoint.USEast2);
+
+    var db = new DynamoDBContext(client);
+
+    var model = JobDbModel.FromEntity(job);
+
+    await db.SaveAsync(model);
+
+    return Results.Created($"/api/jobs/{job.Id}", job);
+});
+
+app.MapGet("/api/v2/jobs/{id}", async (string id) =>
+{
+    var client = new AmazonDynamoDBClient(RegionEndpoint.USEast2);
+
+    var db = new DynamoDBContext(client);
+
+    var job = await db.LoadAsync<JobDbModel>(id.ToString());
+
+    if (job is null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Ok(job);
+});
+
+app.MapGet("/api/v2/jobs", async () =>
+{
+    var client = new AmazonDynamoDBClient(RegionEndpoint.USEast2);
+
+    var db = new DynamoDBContext(client);
+
+    var jobs = await db.ScanAsync<JobDbModel>([]).GetRemainingAsync();
+
+    return Results.Ok(jobs);
+});
+
+app.MapPost("/api/v2/jobs/{jobId}/job-applications", async (string jobId, JobApplication application,
+            [FromServices] IConfiguration configuration) =>
+{
+    var dbClient = new AmazonDynamoDBClient(RegionEndpoint.USEast2);
+
+    var db = new DynamoDBContext(dbClient);
+
+    var job = await db.LoadAsync<JobDbModel>(jobId);
+
+    if (job is null)
+    {
+        return Results.NotFound();
+    }
+
+    var model = new JobApplicationDbModel
+    {
+        Id = Guid.NewGuid().ToString(),
+        CandidateEmail = application.CandidateEmail,
+        CandidateName = application.CandidateName,
+        CVUrl = string.Empty
+    };
+
+    job.Applications.Add(model);
+
+    await db.SaveAsync(job);
+
+    var client = new AmazonSQSClient(RegionEndpoint.USEast2);
+
+    var message = $"Nova candidatura para a vaga {jobId}:\n" +
+                  $"Nome: {application.CandidateName}\n" +
+                  $"Email: {application.CandidateEmail}";
+
+    var requestSqs = new Amazon.SQS.Model.SendMessageRequest
+    {
+        QueueUrl = connectionStringSqs,
+        MessageBody = System.Text.Json.JsonSerializer.Serialize(message)
+    };
+
+    var result = await client.SendMessageAsync(requestSqs);
+
+    if (result.HttpStatusCode != System.Net.HttpStatusCode.OK)
+    {
+        return Results.StatusCode((int)result.HttpStatusCode);
+    }
+
+    return Results.NoContent();
+});
+
+app.MapPut("/api/v2/jobs/{id}/job-applications/{applicationId}/upload-cv", async (string id, string applicationId, IFormFile file) =>
+{
+    if (file == null || file.Length == 0)
+    {
+        return Results.BadRequest();
+    }
+
+    var extension = Path.GetExtension(file.FileName);
+
+    var validExtensions = new List<string> { ".pdf", ".docx" };
+
+    if (!validExtensions.Contains(extension))
+    {
+        return Results.BadRequest();
+    }
+
+    var client = new AmazonS3Client(RegionEndpoint.USEast2);
+
+    var bucketName = "awstudys2";
+    var key = $"job-applications/{applicationId}-{file.FileName}";
+
+    using var stream = file.OpenReadStream();
+
+    var putObject = new PutObjectRequest
+    {
+        BucketName = bucketName,
+        Key = key,
+        InputStream = stream
+    };
+
+    var response = await client.PutObjectAsync(putObject);
+
+    var dbClient = new AmazonDynamoDBClient(RegionEndpoint.USEast2);
+
+    var db = new DynamoDBContext(dbClient);
+
+    var job = await db.LoadAsync<JobDbModel>(id);
+
+    var application = job.Applications.SingleOrDefault(a => a.Id == applicationId);
+
+    if (application is null)
+    {
+        return Results.NotFound();
+    }
+
+    application.CVUrl = key;
+
+    await db.SaveAsync(job);
+
+    return Results.NoContent();
+}).DisableAntiforgery();
+
 
 app.MapPost("/api/jobs", async (Job job, AppDbContext db) =>
 {
