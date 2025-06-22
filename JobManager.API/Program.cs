@@ -1,9 +1,12 @@
 using Amazon;
 using Amazon.S3;
 using Amazon.S3.Model;
+using Amazon.SQS;
+using JobManager.API.Configuration;
 using JobManager.API.DTO;
 using JobManager.API.Entities;
 using JobManager.API.Persistance;
+using JobManager.API.Workers;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -34,6 +37,15 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var connectionString = builder.Configuration.GetConnectionString("AppDb");
+var connectionStringSqs = builder.Configuration.GetConnectionString("Sqs");
+
+builder.Services.AddSingleton(new SqsSettings
+{
+    QueueUrl = connectionStringSqs
+});
+
+builder.Services.AddHostedService<JobApplicationNotificationWorker>();
+
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(connectionString));
 
@@ -75,7 +87,12 @@ app.MapGet("/api/jobs", async (AppDbContext db) =>
     return Results.Ok(jobs);
 });
 
-app.MapPost("/api/jobs/{jobId}/job-applications", async (int jobId, JobApplicationRequest request, [FromServices] AppDbContext db) =>
+app.MapPost("/api/jobs/{jobId}/job-applications", async (
+    int jobId,
+    JobApplicationRequest request,
+    [FromServices] AppDbContext db,
+    [FromServices] IConfiguration configuration
+    ) =>
 {
     var exists = await db.Jobs.AnyAsync(j => j.Id == jobId);
 
@@ -95,6 +112,21 @@ app.MapPost("/api/jobs/{jobId}/job-applications", async (int jobId, JobApplicati
     await db.JobApplications.AddAsync(application);
     await db.SaveChangesAsync();
 
+    var sqs = new AmazonSQSClient(RegionEndpoint.USEast2);
+    var message = $"Nova candidatura para a vaga {jobId}:\n" +
+                  $"Nome: {request.CandidateName}\n" +
+                  $"Email: {request.CandidateEmail}";
+    var requestSqs = new Amazon.SQS.Model.SendMessageRequest
+    {
+        QueueUrl = connectionStringSqs,
+        MessageBody = System.Text.Json.JsonSerializer.Serialize(message)
+    };
+
+    var result = await sqs.SendMessageAsync(requestSqs);
+    if (result.HttpStatusCode != System.Net.HttpStatusCode.OK)
+    {
+        return Results.StatusCode((int)result.HttpStatusCode);
+    }
     return Results.NoContent();
 });
 
